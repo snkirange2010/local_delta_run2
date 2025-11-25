@@ -1,6 +1,6 @@
 package com.rbccm.rbccm.regtech.cf.recon.reader
 
-import com.rbccm.rbccm.regtech.cf.recon.common.{JobContext, ManagedDataset, SparkContextProvider}
+import com.rbccm.rbccm.regtech.cf.recon.common.{ManagedDataset, SparkContextProvider}
 import com.rbccm.rbccm.regtech.cf.recon.xml.{DataSourceTypeV0, UnityCatalogValueV0}
 import org.apache.spark.sql.DataFrame
 
@@ -10,59 +10,119 @@ class UcTableReader(private val metadata: DataSourceTypeV0)
   private lazy val ucValue = metadata.datasource.asInstanceOf[UnityCatalogValueV0]
   private val fullTableName = s"${ucValue.catalogName}.${ucValue.schemaName}.${ucValue.tableName}"
   
-  override def validateManifest(): Boolean = true
+  private def logInfo(message: String): Unit = {
+    println(s"[UcTableReader - $fullTableName] $message")
+  }
+  
+  override def validateManifest(): Boolean = {
+    try {
+      val exists = spark.catalog.tableExists(fullTableName)
+      if (exists) {
+        logInfo("Table validation successful")
+      } else {
+        logInfo("Table does not exist")
+      }
+      exists
+    } catch {
+      case e: Exception =>
+        logInfo(s"Validation failed: ${e.getMessage}")
+        false
+    }
+  }
   
   override def getData(): ManagedDataset = {
-    // Start with base reader
-    var reader = spark.read
+    logInfo("Starting data load")
     
-    // Apply read options if specified
-    if (ucValue.readOption.nonEmpty) {
-      ucValue.readOption.foreach { case (key, value) =>
-        reader = reader.option(key, value)
-      }
-    }
-    
-    // Load the Unity Catalog table
-    var df: DataFrame = reader.table(fullTableName)
-    
-    // Apply filter expression if specified
-    if (ucValue.filterExpression.isDefined && ucValue.filterExpression.get.trim.nonEmpty) {
-      df = df.filter(ucValue.filterExpression.get)
-    }
-    
-    // Apply custom schema/column selection if specified
-    if (ucValue.customSchema.isDefined && ucValue.customSchema.get.trim.nonEmpty) {
-      val columns = ucValue.customSchema.get.split(",").map(_.trim)
-      df = df.selectExpr(columns: _*)
-    }
-    
-    // Apply extra parameters (repartition, cache, coalesce)
-    if (ucValue.extraParamMap.nonEmpty) {
-      ucValue.extraParamMap.foreach { case (key, value) =>
-        key.toLowerCase match {
-          case "repartition" =>
-            val numPartitions = value.toInt
-            if (numPartitions > 0) {
-              df = df.repartition(numPartitions)
-            }
-          case "cache" =>
-            if (value.toLowerCase == "true") {
-              df = df.cache()
-            }
-          case "coalesce" =>
-            val numPartitions = value.toInt
-            if (numPartitions > 0) {
-              df = df.coalesce(numPartitions)
-            }
-          case _ => 
-            // Log or ignore unknown parameters
-            println(s"Warning: Unknown extra parameter '$key' with value '$value' ignored")
+    try {
+      // Apply read options from readOption map
+      var reader = spark.read
+      
+      if (ucValue.readOption.nonEmpty) {
+        logInfo(s"Applying ${ucValue.readOption.size} read options")
+        ucValue.readOption.foreach { case (key, value) =>
+          reader = reader.option(key, value)
+          logInfo(s"Read option: $key = $value")
         }
       }
+      
+      // Load Unity Catalog table
+      logInfo(s"Loading table: $fullTableName")
+      var df: DataFrame = reader.table(fullTableName)
+      logInfo(s"Table loaded with schema: ${df.schema.fieldNames.mkString(", ")}")
+      
+      // Apply filter expression if provided
+      if (ucValue.filterExpression.isDefined && ucValue.filterExpression.get.trim.nonEmpty) {
+        val filterExpr = ucValue.filterExpression.get
+        logInfo(s"Applying filter: $filterExpr")
+        df = df.filter(filterExpr)
+      }
+      
+      // Apply custom schema (column selection) if provided
+      if (ucValue.customSchema.isDefined && ucValue.customSchema.get.trim.nonEmpty) {
+        val columns = ucValue.customSchema.get.split(",").map(_.trim)
+        logInfo(s"Applying custom schema with ${columns.length} columns: ${columns.mkString(", ")}")
+        df = df.selectExpr(columns: _*)
+      }
+      
+      // Apply extra parameters (repartition, cache, coalesce)
+      if (ucValue.extraParamMap.nonEmpty) {
+        logInfo(s"Processing ${ucValue.extraParamMap.size} extra parameters")
+        ucValue.extraParamMap.foreach { case (key, value) =>
+          key.toLowerCase match {
+            case "repartition" =>
+              try {
+                val numPartitions = value.toInt
+                if (numPartitions > 0) {
+                  logInfo(s"Repartitioning to $numPartitions partitions")
+                  df = df.repartition(numPartitions)
+                } else {
+                  logInfo(s"Skipping repartition: invalid partition count $numPartitions")
+                }
+              } catch {
+                case e: NumberFormatException =>
+                  val errorMsg = s"Invalid repartition value '$value' - must be a positive integer"
+                  logInfo(errorMsg)
+                  throw new IllegalArgumentException(errorMsg, e)
+              }
+              
+            case "cache" =>
+              if (value.equalsIgnoreCase("true")) {
+                logInfo("Caching DataFrame")
+                df = df.cache()
+              } else {
+                logInfo(s"Skipping cache: value is '$value' (expected 'true')")
+              }
+              
+            case "coalesce" =>
+              try {
+                val numPartitions = value.toInt
+                if (numPartitions > 0) {
+                  logInfo(s"Coalescing to $numPartitions partitions")
+                  df = df.coalesce(numPartitions)
+                } else {
+                  logInfo(s"Skipping coalesce: invalid partition count $numPartitions")
+                }
+              } catch {
+                case e: NumberFormatException =>
+                  val errorMsg = s"Invalid coalesce value '$value' - must be a positive integer"
+                  logInfo(errorMsg)
+                  throw new IllegalArgumentException(errorMsg, e)
+              }
+              
+            case _ =>
+              logInfo(s"Warning: Unknown extraParamMap key '$key' with value '$value' ignored")
+          }
+        }
+      }
+      
+      logInfo("Data load completed successfully")
+      ManagedDataset(df, Map.empty)
+      
+    } catch {
+      case e: Exception =>
+        logInfo(s"Failed to load data: ${e.getMessage}")
+        throw e
     }
-    
-    ManagedDataset(df, Map.empty)
   }
   
   override def getSourceMetadata: DataSourceTypeV0 = metadata
