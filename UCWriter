@@ -172,3 +172,56 @@ class UCTableWriter(exportType: ExportTypeV1, data: ManagedDataset)
   }
 }
 
+-----------------
+/**
+ * Saves the content of the ManagedDataset to a Unity Catalog managed table.
+ * For overwrite mode on partitioned tables, uses dynamic partition overwrite by default
+ * to prevent accidental deletion of unaffected partitions.
+ * 
+ * @param format          Data format (typically "delta" for Unity Catalog)
+ * @param tableName       Full three-part Unity Catalog table name (catalog.schema.table)
+ * @param mode            SaveMode behavior (append, overwrite, errorIfExists, ignore)
+ * @param options         Additional write options for Delta/Unity Catalog
+ * @param partitionCols   Comma separated list of partition columns
+ * @param limit           Optional limit on number of rows to write
+ */
+def saveAsTable(
+  format: String,
+  tableName: String,
+  mode: String,
+  options: Map[String, String],
+  partitionCols: Seq[String],
+  limit: Option[Int]
+): Unit = {
+  
+  val limitedDF = if (limit.exists(p => p > 0)) dataset.limit(limit.get) else dataset
+  
+  var dataframeWriter: DataFrameWriter[Row] = limitedDF.write.format(format)
+  
+  if (mode != null) dataframeWriter.mode(mode)
+  
+  // CRITICAL: For overwrite mode on partitioned tables, default to dynamic partition overwrite
+  // This prevents accidental deletion of all partitions in the table
+  val finalOptions = if (mode == "overwrite" && partitionCols != null && partitionCols.nonEmpty) {
+    // Check if user has already specified partitionOverwriteMode
+    if (options != null && options.contains("partitionOverwriteMode")) {
+      // User explicitly set it, respect their choice
+      options
+    } else {
+      // Default to dynamic for safety
+      val defaultOption = Map("partitionOverwriteMode" -> "dynamic")
+      if (options != null) defaultOption ++ options else defaultOption
+    }
+  } else {
+    options
+  }
+  
+  if (finalOptions != null && finalOptions.nonEmpty) 
+    dataframeWriter.options(finalOptions)
+  
+  if (partitionCols != null && partitionCols.nonEmpty) 
+    dataframeWriter.partitionBy(partitionCols: _*)
+  
+  // Use saveAsTable for Unity Catalog tables
+  dataframeWriter.saveAsTable(tableName)
+}
