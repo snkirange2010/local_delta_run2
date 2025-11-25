@@ -1,0 +1,20 @@
+def write(): Unit = {
+  try {
+    val (format: String, updatedExportType: ExportTypeV1) = exportType.tableFormat match {
+      case TableTypeEnum.DELTA =>
+        (exportType.tableFormat.toString, exportType)
+      case other =>
+        throw new IllegalArgumentException(s"Unsupported table type: $other. Only DELTA is supported.")
+    }
+    
+    data.save(format, updatedExportType.ucTable.toString, 
+      updatedExportType.mode, updatedExportType.optionsMap,
+      updatedExportType.partition, updatedExportType.limit)
+    
+    logger.info(s"Successfully wrote ${data.count} records to ${updatedExportType.ucTable}")
+  } catch {
+    case e: Exception =>
+      logger.error(s"Failed to write to UC table ${exportType.ucTable}", e)
+      throw e
+  }
+}
