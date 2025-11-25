@@ -18,3 +18,47 @@ def write(): Unit = {
       throw e
   }
 }
+
+
+def write(): Unit = {
+  try {
+    val (format: String, updatedExportType: ExportTypeV1WithTableFormat) = 
+      exportType.tableFormat match {
+        case TableTypeEnum.DELTA =>
+          (exportType.tableFormat.toString.toLowerCase, exportType)
+        case other =>
+          throw new IllegalArgumentException(
+            s"Unsupported table type: $other. Only DELTA is supported for Unity Catalog.")
+      }
+    
+    // Apply limit if specified
+    val dataToWrite = updatedExportType.limit
+      .map(l => data.limit(l))
+      .getOrElse(data)
+    
+    logger.info(s"Writing ${dataToWrite.count} records to Unity Catalog table: ${updatedExportType.ucTable}")
+    
+    // Standard Databricks Unity Catalog write pattern
+    val writer = dataToWrite.write
+      .format(format)  // Should be "delta"
+      .mode(updatedExportType.mode)  // append, overwrite, errorIfExists, ignore
+      .options(updatedExportType.optionsMap)
+    
+    // Add partitioning if specified
+    val partitionedWriter = if (updatedExportType.partition.nonEmpty) {
+      writer.partitionBy(updatedExportType.partition: _*)
+    } else {
+      writer
+    }
+    
+    // Write to Unity Catalog table (three-part namespace required)
+    partitionedWriter.saveAsTable(updatedExportType.ucTable.toString)
+    
+    logger.info(s"Successfully wrote to UC table: ${updatedExportType.ucTable}")
+    
+  } catch {
+    case e: Exception =>
+      logger.error(s"Failed to write to Unity Catalog table ${exportType.ucTable}", e)
+      throw e
+  }
+}
