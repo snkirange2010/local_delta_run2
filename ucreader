@@ -1,0 +1,69 @@
+package com.rbccm.rbccm.regtech.cf.recon.reader
+
+import com.rbccm.rbccm.regtech.cf.recon.common.{JobContext, ManagedDataset, SparkContextProvider}
+import com.rbccm.rbccm.regtech.cf.recon.xml.{DataSourceTypeV0, UnityCatalogValueV0}
+import org.apache.spark.sql.DataFrame
+
+class UcTableReader(private val metadata: DataSourceTypeV0) 
+  extends DataSource with SparkContextProvider with Serializable {
+  
+  private lazy val ucValue = metadata.datasource.asInstanceOf[UnityCatalogValueV0]
+  private val fullTableName = s"${ucValue.catalogName}.${ucValue.schemaName}.${ucValue.tableName}"
+  
+  override def validateManifest(): Boolean = true
+  
+  override def getData(): ManagedDataset = {
+    // Start with base reader
+    var reader = spark.read
+    
+    // Apply read options if specified
+    if (ucValue.readOption.nonEmpty) {
+      ucValue.readOption.foreach { case (key, value) =>
+        reader = reader.option(key, value)
+      }
+    }
+    
+    // Load the Unity Catalog table
+    var df: DataFrame = reader.table(fullTableName)
+    
+    // Apply filter expression if specified
+    if (ucValue.filterExpression.isDefined && ucValue.filterExpression.get.trim.nonEmpty) {
+      df = df.filter(ucValue.filterExpression.get)
+    }
+    
+    // Apply custom schema/column selection if specified
+    if (ucValue.customSchema.isDefined && ucValue.customSchema.get.trim.nonEmpty) {
+      val columns = ucValue.customSchema.get.split(",").map(_.trim)
+      df = df.selectExpr(columns: _*)
+    }
+    
+    // Apply extra parameters (repartition, cache, coalesce)
+    if (ucValue.extraParamMap.nonEmpty) {
+      ucValue.extraParamMap.foreach { case (key, value) =>
+        key.toLowerCase match {
+          case "repartition" =>
+            val numPartitions = value.toInt
+            if (numPartitions > 0) {
+              df = df.repartition(numPartitions)
+            }
+          case "cache" =>
+            if (value.toLowerCase == "true") {
+              df = df.cache()
+            }
+          case "coalesce" =>
+            val numPartitions = value.toInt
+            if (numPartitions > 0) {
+              df = df.coalesce(numPartitions)
+            }
+          case _ => 
+            // Log or ignore unknown parameters
+            println(s"Warning: Unknown extra parameter '$key' with value '$value' ignored")
+        }
+      }
+    }
+    
+    ManagedDataset(df, Map.empty)
+  }
+  
+  override def getSourceMetadata: DataSourceTypeV0 = metadata
+}
