@@ -62,3 +62,113 @@ def write(): Unit = {
       throw e
   }
 }
+------------------------------------
+
+/**
+ * Saves the content of the <code>ManagedDataset</code> at the specified path.
+ * Default format is "csv". <br>
+ * Default mode is "overwrite".
+ * Currently only CSV and Parquet format are supported
+ * 
+ * @param format          Data format in which content to be saved.
+ * @param saveLocation    Location at which data will be saved
+ * @param mode            Specifies the behavior when data or table already exists
+ * @param options         Adds output options for the underlying data source
+ * @param partitionCols   comma separated list of partition columns
+ */
+def save(
+  format: String = "csv",
+  saveLocation: String,
+  mode: String = "overwrite",
+  options: Map[String, String],
+  partitionCols: Seq[String],
+  limit: Option[Int]
+): AnyVal = {
+  
+  val limitedDF = if (limit.exists(p => p > 0)) dataset.limit(limit.get) else dataset
+  
+  val dataframeWriter: DataFrameWriter[Row] = limitedDF.write.format(format)
+  
+  if (mode != null) dataframeWriter.mode(mode)
+  
+  if (options != null && options.nonEmpty) dataframeWriter.options(options)
+  
+  if (partitionCols != null && partitionCols.nonEmpty) 
+    dataframeWriter.partitionBy(partitionCols: _*)
+  
+  if (saveLocation != null)
+    writeData(dataframeWriter, saveLocation, mode, format)
+  else
+    dataframeWriter.save()
+}
+
+/**
+ * Saves the content of the ManagedDataset to a Unity Catalog managed table.
+ * 
+ * @param format          Data format (typically "delta" for Unity Catalog)
+ * @param tableName       Full three-part Unity Catalog table name (catalog.schema.table)
+ * @param mode            SaveMode behavior (append, overwrite, errorIfExists, ignore)
+ * @param options         Additional write options for Delta/Unity Catalog
+ * @param partitionCols   Comma separated list of partition columns
+ * @param limit           Optional limit on number of rows to write
+ */
+def saveAsTable(
+  format: String,
+  tableName: String,
+  mode: String,
+  options: Map[String, String],
+  partitionCols: Seq[String],
+  limit: Option[Int]
+): Unit = {
+  
+  val limitedDF = if (limit.exists(p => p > 0)) dataset.limit(limit.get) else dataset
+  
+  var dataframeWriter: DataFrameWriter[Row] = limitedDF.write.format(format)
+  
+  if (mode != null) dataframeWriter.mode(mode)
+  
+  if (options != null && options.nonEmpty) dataframeWriter.options(options)
+  
+  if (partitionCols != null && partitionCols.nonEmpty) 
+    dataframeWriter.partitionBy(partitionCols: _*)
+  
+  // Use saveAsTable for Unity Catalog tables
+  dataframeWriter.saveAsTable(tableName)
+}
+
+----------------------------------
+class UCTableWriter(exportType: ExportTypeV1, data: ManagedDataset) 
+  extends SparkContextProvider {
+  
+  def write(): Unit = {
+    try {
+      val (format: String, updatedExportType: ExportTypeV1) = 
+        exportType.tableFormat match {
+          case TableTypeEnum.DELTA => ("delta", exportType)
+          case other => 
+            throw new IllegalArgumentException(
+              s"Unsupported table type: $other. Only DELTA is supported.")
+        }
+      
+      logger.debug(s"export size ${data.count}")
+      
+      // Call saveAsTable instead of save
+      data.saveAsTable(
+        format = format,
+        tableName = updatedExportType.ucTable.toString,
+        mode = updatedExportType.mode,
+        options = updatedExportType.optionsMap,
+        partitionCols = updatedExportType.partition,
+        limit = updatedExportType.limit
+      )
+      
+      logger.info(s"Successfully wrote to UC table: ${updatedExportType.ucTable}")
+      
+    } catch {
+      case e: Exception =>
+        logger.error(s"Failed to write to Unity Catalog table ${exportType.ucTable}", e)
+        throw e
+    }
+  }
+}
+
